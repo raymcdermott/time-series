@@ -43,11 +43,18 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
+(defn window-closed? [window-close-time]
+  (let [now (t/now)]
+    (t/before? now window-close-time)))
+
+(defn within-window? [window-open window-close item-time]
+  (let [interval (t/interval window-open window-close)]
+    (t/within? interval item-time)))
+
 (defn in-current-window? [window-seconds window-open elem]
   (let [[time _] elem
-        window-close (t/plus window-open (t/seconds window-seconds))
-        window (t/interval window-open window-close)]
-    (t/within? window time)))
+        window-close (t/plus window-open (t/seconds window-seconds))]
+    (within-window? window-open window-close time)))
 
 ; TODO: design for sliding and overlapping windows (tap into a time channel?)
 ; generate windows on a timing channel
@@ -55,17 +62,44 @@
 ; emit active windows for each item? [yes, let's start with this]
 ; or emit event N times? [no]
 
+(def active-windows (atom []))
+
+(defn update-windows! [window]
+  (let [all-windows (swap! active-windows conj window)
+        active (filter #(window-closed? (:to %)) all-windows)]
+    (reset! active-windows active)))
+
+(defn window [open-duration slide-interval]
+  "Create a window for n seconds that slides every n seconds"
+  {:pre [(> open-duration 0)
+         (> slide-interval 0)]}
+  (let [out (chan)]
+    (go-loop [start-time false]
+      (let [id (gensym)
+            t0 (or start-time (t/now))                      ; no gaps!
+            t1 (t/plus t0 (t/seconds open-duration))
+            w (assoc {} :id id :from t0 :to t1)
+            new-window ["Window" w]]
+        (do
+          (>! out new-window)
+          (Thread/sleep (* 1000 slide-interval))
+          (recur (and (= open-duration slide-interval) t1)))))
+    out))
+
 (defn window-filter
   [n-secs in]
   (let [out (chan)
         in-window? (partial in-current-window? n-secs (t/now))]
     (go-loop []
       (if-let [item (<! in)]
-        (let [[_ text] item]
-          (do
-            (if (in-window? item)
-              (>! out text))
-            (recur)))
+        (let [[part1 part2] item]
+          (if (= part1 "Window")
+            (update-windows! part2)
+            (let [[_ text] item]
+              (do
+                (if (in-window? item)
+                  (>! out text)))))
+          (recur))
         (close! out)))
     out))
 
@@ -98,4 +132,4 @@
 
 (simple-printer aggregated)
 
-(onto-chan in-chan green-eggs-n-ham)
+;(onto-chan in-chan green-eggs-n-ham)
