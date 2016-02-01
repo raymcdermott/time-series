@@ -1,8 +1,7 @@
 (ns green-eggs.core
   (:require [clojure.core.async
              :as a
-             :refer [>! <! >!! <!! go chan buffer close! thread
-                     alts! alts!! timeout onto-chan]]
+             :refer [>! <! >!! <!! go go-loop chan buffer close! onto-chan]]
             [clj-time.core :as t]
             [clj-time.coerce :refer [from-date]]))
 
@@ -32,56 +31,56 @@
 (defn time-stamper
   [timestamper in]
   (let [out (chan)]
-    (a/go-loop []
+    (go-loop []
       (if-let [item (<! in)]
-        (if-let [enriched (timestamper item)]
-          (>! out enriched)))
-      (recur))
+        (do
+          (>! out (timestamper item))
+          (recur))
+        (close! out)))
     out))
 
 ; for testing the window
-(def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 200)))
+(def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
 (defn in-current-window? [window-seconds window-open elem]
-  (let [[time item] elem
+  (let [[time _] elem
         window-close (t/plus window-open (t/seconds window-seconds))
         window (t/interval window-open window-close)]
     (t/within? window time)))
 
-; TODO: add an id for each interval so that downstream consumers can see when the window closes
+; TODO: design for sliding and overlapping windows (tap into a time channel?)
 (defn window-filter
-  [in n-secs]
+  [n-secs in]
   (let [out (chan)
-        window-id (atom 0)
-        window-opening-time (atom (t/now))]
-    (a/go-loop [id window-id
-                opening-time window-opening-time]
+        in-window? (partial in-current-window? n-secs (t/now))]
+    (go-loop []
       (if-let [item (<! in)]
-        (let [in-window? (partial in-current-window? n-secs window-opening-time)
-              is-in-window? (in-window? item)]
-          (if (is-in-window?)
-            (>! out [id item])
-            (let [id (swap! window-id inc)
-                  opening-time (swap! window-opening-time t/now)]
-              (>! out [id item])))))
-      (recur window-id opening-time))
+        (let [[_ text] item]
+          (do
+            (if (in-window? item)
+              (>! out text))
+            (recur)))
+        (close! out)))
     out))
 
 (defn interval-aggregator [in]
   (let [out (chan)
         wc (atom 0)]
-    (a/go-loop []
-      (if-let [[id item] (<! in)]
-        (>! out [id (swap! wc + (count item))]))
-      (recur))
+    (go-loop []
+      (if-let [item (<! in)]
+        (do
+          (>! out (swap! wc + (count item)))
+          (recur))
+        (close! out)))
     out))
 
 (defn simple-printer [in]
-  (a/go-loop []
+  (go-loop []
     (if-let [item (<! in)]
-      (clojure.pprint/pprint item))
-    (recur)))
+      (do
+        (clojure.pprint/pprint item)
+        (recur)))))
 
 (def in-chan (chan))
 
@@ -93,4 +92,4 @@
 
 (simple-printer aggregated)
 
-;(onto-chan in-chan green-eggs-n-ham)
+(onto-chan in-chan green-eggs-n-ham)
