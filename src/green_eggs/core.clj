@@ -50,6 +50,11 @@
     (t/within? window time)))
 
 ; TODO: design for sliding and overlapping windows (tap into a time channel?)
+; generate windows on a timing channel
+; keep a list of active windows (need an atom?)
+; emit active windows for each item? [yes, let's start with this]
+; or emit event N times? [no]
+
 (defn window-filter
   [n-secs in]
   (let [out (chan)
@@ -64,6 +69,7 @@
         (close! out)))
     out))
 
+; should do this on window boundary
 (defn interval-aggregator [in]
   (let [out (chan)
         wc (atom 0)]
