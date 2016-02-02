@@ -43,19 +43,6 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
-(defn window-closed? [window-close-time]
-  (let [now (t/now)]
-    (t/before? now window-close-time)))
-
-(defn within-window? [window-open window-close item-time]
-  (let [interval (t/interval window-open window-close)]
-    (t/within? interval item-time)))
-
-(defn in-current-window? [window-seconds window-open elem]
-  (let [[time _] elem
-        window-close (t/plus window-open (t/seconds window-seconds))]
-    (within-window? window-open window-close time)))
-
 ; TODO: design for sliding and overlapping windows (tap into a time channel?)
 ; generate windows on a timing channel
 ; keep a list of active windows (need an atom?)
@@ -66,8 +53,19 @@
 
 (defn update-windows! [window]
   (let [all-windows (swap! active-windows conj window)
-        active (filter #(window-closed? (:to %)) all-windows)]
+        closed? (partial (t/before? (t/now)))
+        active (filter #(closed? (:to %)) all-windows)]
     (reset! active-windows active)))
+
+(defn within-window? [window-open window-close item-time]
+  (let [interval (t/interval window-open window-close)]
+    (t/within? interval item-time)))
+
+(defn in-which-windows? [item]
+  (let [[item-time _] item
+        matching-windows (filter #(within-window? (:from %) (:to %) item-time) @active-windows)]
+    (map #([item %]) matching-windows)))
+
 
 (defn window [open-duration slide-interval]
   "Create a window for n seconds that slides every n seconds"
@@ -87,18 +85,16 @@
     out))
 
 (defn window-filter
-  [n-secs in]
-  (let [out (chan)
-        in-window? (partial in-current-window? n-secs (t/now))]
+  [in]
+  (let [out (chan)]
     (go-loop []
       (if-let [item (<! in)]
         (let [[part1 part2] item]
-          (if (= part1 "Window")
-            (update-windows! part2)
-            (let [[_ text] item]
-              (do
-                (if (in-window? item)
-                  (>! out text)))))
+          (cond
+            (= part1 "Window") (update-windows! part2)
+            (= org.joda.time.DateTime (type part1)) (if-let [output (in-which-windows? part2)]
+                                                      (>! out output))
+            :else (println "unknown item - dropping" item))
           (recur))
         (close! out)))
     out))
@@ -126,7 +122,11 @@
 
 (def standard-channel (time-stamper add-timestamp-with-delay in-chan))
 
-(def windowed (window-filter 2 standard-channel))
+(def windows-channel (window 10 10))
+
+(def merged-channel (a/merge standard-channel windows-channel))
+
+(def windowed (window-filter merged-channel))
 
 (def aggregated (interval-aggregator windowed))
 
