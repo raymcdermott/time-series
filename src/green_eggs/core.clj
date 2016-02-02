@@ -43,29 +43,28 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
-; TODO: design for sliding and overlapping windows (tap into a time channel?)
-; generate windows on a timing channel
-; keep a list of active windows (need an atom?)
-; emit active windows for each item? [yes, let's start with this]
-; or emit event N times? [no]
-
 (def active-windows (atom []))
 
+; TODO support :closed flag to enable boundary aggregation
+; TODO support clearing of closed windows after a retention period (default to 30 seconds)
+; TODO eventually support env var than varies the retention period (0 -> n)
 (defn update-windows! [window]
+  "maintains the definitions of which windows are active by comparing the close time to now"
   (let [all-windows (swap! active-windows conj window)
         closed? (partial (t/before? (t/now)))
         active (filter #(closed? (:to %)) all-windows)]
     (reset! active-windows active)))
 
-(defn within-window? [window-open window-close item-time]
-  (let [interval (t/interval window-open window-close)]
-    (t/within? interval item-time)))
+(defn within-interval? [from to time]
+  "Check whether a time is within an interval"
+  (let [interval (t/interval from to)]
+    (t/within? interval time)))
 
 (defn in-which-windows? [item]
+  "Obtains any time windows that match on the item time"
   (let [[item-time _] item
-        matching-windows (filter #(within-window? (:from %) (:to %) item-time) @active-windows)]
+        matching-windows (filter #(within-interval? (:from %) (:to %) item-time) @active-windows)]
     (map #([item %]) matching-windows)))
-
 
 (defn window [open-duration slide-interval]
   "Create a window for n seconds that slides every n seconds"
@@ -85,6 +84,7 @@
     out))
 
 (defn window-filter
+  "Allocate items to appropriate time windows"
   [in]
   (let [out (chan)]
     (go-loop []
@@ -99,7 +99,7 @@
         (close! out)))
     out))
 
-; should do this on window boundary
+; TODO: this on window boundary
 (defn interval-aggregator [in]
   (let [out (chan)
         wc (atom 0)]
