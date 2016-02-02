@@ -43,28 +43,40 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
-(def active-windows (atom []))
+; TODO change this to a set based on the window ID
+(def time-windows (atom []))
 
-; TODO support :closed flag to enable boundary aggregation
-; TODO support clearing of closed windows after a retention period (default to 30 seconds)
-; TODO eventually support env var than varies the retention period (0 -> n)
-(defn update-windows! [window]
-  "maintains the definitions of which windows are active by comparing the close time to now"
-  (let [all-windows (swap! active-windows conj window)
-        closed? (partial (t/before? (t/now)))
-        active (filter #(closed? (:to %)) all-windows)]
-    (reset! active-windows active)))
+(defn add-window [window]
+  (swap! time-windows conj window))
+
+(defn update-window [window item]
+  ;TODO add item
+  )
+
+; TODO eventually support env var that varies the retention period (0 -> n)
+(def retention-period (t/seconds 30))
+
+(defn archive-windows! []
+  "maintains the definitions of current windows"
+  (let [now (t/now)
+        active-windows (filter #(t/after? now (:to %)) @time-windows)
+        inactive-windows (filter #(t/before? now (:to %)) @time-windows)
+        closed-windows (map #(assoc % :closed true) inactive-windows)
+        retention-boundary (t/minus now retention-period)
+        updated-windows (filter #(t/before? retention-boundary (:to %)) closed-windows)
+        corrected-windows (concat active-windows updated-windows)]
+    (clojure.pprint/pprint "UPDATED WINDOWS:" corrected-windows)
+    (reset! time-windows corrected-windows)))
 
 (defn within-interval? [from to time]
   "Check whether a time is within an interval"
   (let [interval (t/interval from to)]
     (t/within? interval time)))
 
-(defn in-which-windows? [item]
-  "Obtains any time windows that match on the item time"
+(defn add-item-to-active-windows! [item]
   (let [[item-time _] item
-        matching-windows (filter #(within-interval? (:from %) (:to %) item-time) @active-windows)]
-    (map #([item %]) matching-windows)))
+        matching-windows (filter #(within-interval? (:from %) (:to %) item-time) @time-windows)]
+    (map #(assoc % :items (conj (:items %) item)) matching-windows)))
 
 (defn window [open-duration slide-interval]
   "Create a window for n seconds that slides every n seconds"
@@ -73,11 +85,12 @@
   (let [out (chan)]
     (go-loop [start-time false]
       (let [id (gensym)
-            t0 (or start-time (t/now))                      ; no gaps!
+            t0 (or start-time (t/now))
             t1 (t/plus t0 (t/seconds open-duration))
-            w (assoc {} :id id :from t0 :to t1)
+            w (assoc {} :id id :from t0 :to t1 :items [])
             new-window ["Window" w]]
         (do
+          (add-window new-window)
           (>! out new-window)
           (Thread/sleep (* 1000 slide-interval))
           (recur (and (= open-duration slide-interval) t1)))))
@@ -89,12 +102,11 @@
   (let [out (chan)]
     (go-loop []
       (if-let [item (<! in)]
-        (let [[part1 part2] item]
+        (let [[part1 _] item]
           (cond
-            (= part1 "Window") (update-windows! part2)
-            (= org.joda.time.DateTime (type part1)) (if-let [output (in-which-windows? part2)]
-                                                      (>! out output))
-            :else (println "unknown item - dropping" item))
+            (= part1 "Window") (archive-windows!)
+            (= org.joda.time.DateTime (type part1)) (if-let [output (add-item-to-active-windows! item)]
+                                                      (>! out output)))
           (recur))
         (close! out)))
     out))
@@ -122,14 +134,14 @@
 
 (def standard-channel (time-stamper add-timestamp-with-delay in-chan))
 
-(def windows-channel (window 10 10))
-
-(def merged-channel (a/merge standard-channel windows-channel))
-
-(def windowed (window-filter merged-channel))
-
-(def aggregated (interval-aggregator windowed))
-
-(simple-printer aggregated)
+;(def windows-channel (window 10 10))
+;
+;(def merged-channel (a/merge [standard-channel windows-channel]))
+;
+;(def windowed (window-filter merged-channel))
+;
+;(def aggregated (interval-aggregator windowed))
+;
+;(simple-printer aggregated)
 
 ;(onto-chan in-chan green-eggs-n-ham)
