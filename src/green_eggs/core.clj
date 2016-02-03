@@ -43,10 +43,7 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
-(def time-windows (atom #{}))
-
-(defn drop-window [window]
-  (swap! time-windows dissoc (:id window)))
+(def time-windows (atom {}))
 
 ; TODO support env var that varies the retention period (0 -> n)
 (def retention-period (t/seconds 30))
@@ -54,13 +51,13 @@
 (defn assoc-window [window]
   "Maintain the map of current window(s)"
   (let [all-windows (swap! time-windows assoc (:id window) window)
+        window-maps (map last all-windows)
         now (t/now)
-        to-be-closed (filter #(and (t/before? now (:to %)) (= false (:closed %))) all-windows)
-
+        to-be-closed (filter #(and (t/before? (:to %) now) (= false (:closed %))) window-maps)
         retention-boundary (t/minus now retention-period)
-        to-be-dropped (filter #(and (= true (:closed %)) (t/before? retention-boundary (:to %))) all-windows)]
-    (map #(swap! time-windows assoc (:id %) (assoc % :closed true)) to-be-closed)
-    (map #(swap! time-windows dissoc (:id %)) to-be-dropped)))
+        to-be-dropped (filter #(and (= true (:closed %)) (t/before? (:to %) retention-boundary)) window-maps)]
+    (doall (map #(swap! time-windows assoc (:id %) (assoc % :closed true)) to-be-closed))
+    (doall (map #(swap! time-windows dissoc (:id %)) to-be-dropped))))
 
 (defn add-window [window]
   (assoc-window window))
@@ -77,7 +74,7 @@
   (let [[item-time _] item
         matching-windows (filter #(within-interval? (:from %) (:to %) item-time) @time-windows)
         updated-windows (map #(assoc % :items (conj (:items %) item)) matching-windows)]
-    (map #(update-window %) updated-windows)))
+    (doall (map #(update-window %) updated-windows))))
 
 (defn create-window [open-duration slide-interval]
   "Create a window for n seconds that slides every n seconds"
@@ -103,16 +100,18 @@
     (go-loop []
       (if-let [tuple (<! in)]
         (do
-          (clojure.pprint/pprint tuple)
           (let [[elem1 elem2] tuple]
             (cond
-              (= "Window" elem1) (add-window elem2)
-              (= org.joda.time.DateTime (type elem1))
-              (if-let [output (put-item-in-window tuple)]   ; drop non-matching items
-                (>! out output)))
+              (= "Window" elem1) ((add-window elem2)
+                                   (>! out tuple))
+
+              (= org.joda.time.DateTime (type elem1)) (if-let [output (put-item-in-window tuple)] ; drop non-matching items
+                                                        (doall (map #(>! out %) output))))
             (recur)))
         (close! out)))
     out))
+
+; TODO: persist the last processed id on each window boundary
 
 ; TODO: this on window boundary
 (defn interval-aggregator [in]
@@ -130,21 +129,21 @@
   (go-loop []
     (if-let [item (<! in)]
       (do
-        (clojure.pprint/pprint item)
+        (println item)
         (recur)))))
 
 (def in-chan (chan))
 
-(def standard-channel (time-stamper add-timestamp-with-delay in-chan))
-
+;(def standard-channel (time-stamper add-timestamp-with-delay in-chan))
+;
 (def windows-channel (create-window 10 10))
-
-(def merged-channel (a/merge [standard-channel windows-channel]))
-
-(def windowed (window-matching merged-channel))
-
-;(def aggregated (interval-aggregator windowed))
-
-(simple-printer windowed)
-
-;(onto-chan in-chan green-eggs-n-ham)
+;;
+;(def merged-channel (a/merge [standard-channel windows-channel]))
+;;
+;(def windowed (window-matching merged-channel))
+;;
+;;;;(def aggregated (interval-aggregator windowed))
+;;
+(simple-printer windows-channel)
+;
+(onto-chan in-chan green-eggs-n-ham)
