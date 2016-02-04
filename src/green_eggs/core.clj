@@ -43,21 +43,23 @@
 (def add-timestamp-with-delay (partial add-timestamp (partial delaying-timestamper 500)))
 (def add-timestamp-no-delay (partial add-timestamp t/now))
 
+; separate namespace to hide global
 (def time-windows (atom {}))
 
 ; TODO support env var that varies the retention period (0 -> n)
-(def retention-period (t/seconds 30))
+(def retention-period (t/seconds 5))
 
 (defn assoc-window [window]
   "Maintain the map of current window(s)"
   (let [all-windows (swap! time-windows assoc (:id window) window)
         window-maps (map last all-windows)
         now (t/now)
-        to-be-closed (filter #(and (t/before? (:to %) now) (= false (:closed %))) window-maps)
+        to-be-closed (filter #(and (t/before? (:to %) now) (false? (:closed %))) window-maps)
         retention-boundary (t/minus now retention-period)
-        to-be-dropped (filter #(and (= true (:closed %)) (t/before? (:to %) retention-boundary)) window-maps)]
+        to-be-dropped (filter #(and (:closed %) (t/before? (:to %) retention-boundary)) window-maps)]
     (doall (map #(swap! time-windows assoc (:id %) (assoc % :closed true)) to-be-closed))
-    (doall (map #(swap! time-windows dissoc (:id %)) to-be-dropped))))
+    (doall (map #(swap! time-windows dissoc (:id %)) to-be-dropped))
+    @time-windows))
 
 (defn add-window [window]
   (assoc-window window))
@@ -66,15 +68,18 @@
   (assoc-window window))
 
 (defn within-interval? [from to time]
+  {:pre [(t/before? from to)]}
   "Check whether a time is within an interval"
   (let [interval (t/interval from to)]
     (t/within? interval time)))
 
 (defn put-item-in-window [item]
-  (let [[item-time _] item
-        matching-windows (filter #(within-interval? (:from %) (:to %) item-time) @time-windows)
-        updated-windows (map #(assoc % :items (conj (:items %) item)) matching-windows)]
-    (doall (map #(update-window %) updated-windows))))
+  (let [[item-time data] item
+        window-maps (map last @time-windows)
+        matching-windows (filter #(within-interval? (:from %) (:to %) item-time) window-maps)
+        updated-windows (map #(assoc % :items (conj (:items %) data)) matching-windows)]
+    (doall (map #(update-window %) updated-windows))
+    @time-windows))
 
 (defn create-window [open-duration slide-interval]
   "Create a window for n seconds that slides every n seconds"
@@ -102,25 +107,37 @@
         (do
           (let [[elem1 elem2] tuple]
             (cond
-              (= "Window" elem1) ((add-window elem2)
-                                   (>! out tuple))
+              (= "Window" elem1) (if-let [windows (add-window elem2)]
+                                   (>! out windows))
 
-              (= org.joda.time.DateTime (type elem1)) (if-let [output (put-item-in-window tuple)] ; drop non-matching items
-                                                        (doall (map #(>! out %) output))))
+              (= org.joda.time.DateTime (type elem1)) (if-let [output (put-item-in-window tuple)]
+                                                        (>! out output))
+
+              :else (>! out tuple))
             (recur)))
         (close! out)))
     out))
 
+
 ; TODO: persist the last processed id on each window boundary
 
-; TODO: this on window boundary
+; TODO: allow function to be passed in
 (defn interval-aggregator [in]
-  (let [out (chan)
-        wc (atom 0)]
+  (let [out (chan)]
     (go-loop []
-      (if-let [item (<! in)]
+      (if-let [windows (<! in)]
         (do
-          (>! out (swap! wc + (count item)))
+          (if-let [totals (remove nil? (map (fn [window]
+                                              (let [map-data (last window)
+                                                    items (:items map-data)]
+                                                (if (:closed map-data)
+                                                  (if-let [total (reduce (fn [result item]
+                                                                           (let [c (count item)]
+                                                                             (+ result c))) 0 items)]
+                                                    [total (:id map-data)]))))
+                                            windows))]
+            (if (not (empty? totals))
+              (>! out totals)))
           (recur))
         (close! out)))
     out))
@@ -129,21 +146,25 @@
   (go-loop []
     (if-let [item (<! in)]
       (do
-        (println item)
+        (clojure.pprint/pprint item)
         (recur)))))
 
-(def in-chan (chan))
+(comment
 
-;(def standard-channel (time-stamper add-timestamp-with-delay in-chan))
-;
-(def windows-channel (create-window 10 10))
-;;
-;(def merged-channel (a/merge [standard-channel windows-channel]))
-;;
-;(def windowed (window-matching merged-channel))
-;;
-;;;;(def aggregated (interval-aggregator windowed))
-;;
-(simple-printer windows-channel)
-;
-(onto-chan in-chan green-eggs-n-ham)
+  (def in-chan (chan))
+
+  (def standard-channel (time-stamper add-timestamp-with-delay in-chan))
+
+  (def windows-channel (create-window 2 2))
+
+  (def merged-channel (a/merge [standard-channel windows-channel]))
+
+  (def windowed (window-matching merged-channel))
+
+  (def aggregated (interval-aggregator windowed))
+
+  (simple-printer windowed)
+
+  (onto-chan in-chan green-eggs-n-ham)
+
+  )
